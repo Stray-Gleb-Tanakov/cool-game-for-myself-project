@@ -1,0 +1,377 @@
+// Game setup
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = 800;
+canvas.height = 600;
+
+// Game state
+let player = {
+    x: canvas.width / 2,
+    y: canvas.height / 2,
+    size: 15,
+    speed: 5,
+    angle: 0,
+    health: 100,
+    isShooting: false,
+    shootCooldown: 0
+};
+
+let bullets = [];
+let enemies = [];
+let walls = [];
+let particles = [];
+let kills = 0;
+let combo = 0;
+let lastKillTime = 0;
+
+// Input handling
+const keys = {};
+const mouse = { x: 0, y: 0, isDown: false };
+
+document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = e.clientX - rect.left;
+    mouse.y = e.clientY - rect.top;
+});
+canvas.addEventListener('mousedown', () => mouse.isDown = true);
+canvas.addEventListener('mouseup', () => mouse.isDown = false);
+
+// Initialize level
+function initLevel() {
+    // Create walls (obstacles)
+    walls = [
+        { x: 200, y: 150, width: 100, height: 20 },
+        { x: 500, y: 300, width: 20, height: 100 },
+        { x: 300, y: 400, width: 150, height: 20 },
+        { x: 100, y: 100, width: 20, height: 200 }
+    ];
+    
+    // Create enemies
+    enemies = [
+        { x: 300, y: 200, size: 15, speed: 1, angle: 0, health: 1 },
+        { x: 600, y: 400, size: 15, speed: 1, angle: 0, health: 1 },
+        { x: 150, y: 450, size: 15, speed: 1, angle: 0, health: 1 },
+        { x: 700, y: 150, size: 15, speed: 1, angle: 0, health: 1 }
+    ];
+}
+
+// Player movement
+function updatePlayer() {
+    // Calculate movement based on keys
+    let dx = 0, dy = 0;
+    if (keys['w']) dy -= player.speed;
+    if (keys['s']) dy += player.speed;
+    if (keys['a']) dx -= player.speed;
+    if (keys['d']) dx += player.speed;
+    
+    // Normalize diagonal movement
+    if (dx !== 0 && dy !== 0) {
+        dx *= 0.707;
+        dy *= 0.707;
+    }
+    
+    // Check wall collisions before moving
+    const newX = player.x + dx;
+    const newY = player.y + dy;
+    
+    let canMoveX = true;
+    let canMoveY = true;
+    
+    for (const wall of walls) {
+        if (newX - player.size < wall.x + wall.width &&
+            newX + player.size > wall.x &&
+            player.y - player.size < wall.y + wall.height &&
+            player.y + player.size > wall.y) {
+            canMoveX = false;
+        }
+        
+        if (player.x - player.size < wall.x + wall.width &&
+            player.x + player.size > wall.x &&
+            newY - player.size < wall.y + wall.height &&
+            newY + player.size > wall.y) {
+            canMoveY = false;
+        }
+    }
+    
+    if (canMoveX) player.x = newX;
+    if (canMoveY) player.y = newY;
+    
+    // Keep player in bounds
+    player.x = Math.max(player.size, Math.min(canvas.width - player.size, player.x));
+    player.y = Math.max(player.size, Math.min(canvas.height - player.size, player.y));
+    
+    // Calculate angle to mouse
+    player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    
+    // Shooting
+    if (player.shootCooldown > 0) player.shootCooldown--;
+    
+    if (mouse.isDown && player.shootCooldown === 0) {
+        shoot();
+        player.shootCooldown = 10; // Adjust for fire rate
+    }
+}
+
+// Shooting mechanism
+function shoot() {
+    bullets.push({
+        x: player.x,
+        y: player.y,
+        angle: player.angle,
+        speed: 15,
+        size: 4,
+        distance: 0,
+        maxDistance: 500
+    });
+    
+    // Muzzle flash effect
+    createParticles(player.x, player.y, '#ffff00', 5, 2);
+}
+
+// Particle system for effects
+function createParticles(x, y, color, count, speed) {
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        particles.push({
+            x: x,
+            y: y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            size: Math.random() * 3 + 1,
+            color: color,
+            life: 30
+        });
+    }
+}
+
+// Update bullets
+function updateBullets() {
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const bullet = bullets[i];
+        
+        // Move bullet
+        bullet.x += Math.cos(bullet.angle) * bullet.speed;
+        bullet.y += Math.sin(bullet.angle) * bullet.speed;
+        bullet.distance += bullet.speed;
+        
+        // Remove if out of range
+        if (bullet.distance > bullet.maxDistance) {
+            bullets.splice(i, 1);
+            continue;
+        }
+        
+        // Check wall collisions
+        let hitWall = false;
+        for (const wall of walls) {
+            if (bullet.x > wall.x && bullet.x < wall.x + wall.width &&
+                bullet.y > wall.y && bullet.y < wall.y + wall.height) {
+                bullets.splice(i, 1);
+                hitWall = true;
+                createParticles(bullet.x, bullet.y, '#ff00ff', 8, 3);
+                break;
+            }
+        }
+        
+        if (hitWall) continue;
+        
+        // Check enemy collisions
+        for (let j = enemies.length - 1; j >= 0; j--) {
+            const enemy = enemies[j];
+            const dx = bullet.x - enemy.x;
+            const dy = bullet.y - enemy.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance < bullet.size + enemy.size) {
+                // Hit enemy
+                bullets.splice(i, 1);
+                enemies.splice(j, 1);
+                kills++;
+                
+                // Combo system
+                const now = Date.now();
+                if (now - lastKillTime < 2000) { // 2 seconds
+                    combo++;
+                } else {
+                    combo = 1;
+                }
+                lastKillTime = now;
+                
+                // Blood splatter
+                createParticles(enemy.x, enemy.y, '#ff0000', 20, 5);
+                
+                // Screen shake
+                shakeScreen(5);
+                
+                updateHUD();
+                break;
+            }
+        }
+    }
+}
+
+// Update particles
+function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+        
+        if (p.life <= 0) {
+            particles.splice(i, 1);
+        }
+    }
+}
+
+// Screen shake effect
+let shakeAmount = 0;
+function shakeScreen(intensity) {
+    shakeAmount = intensity;
+}
+
+// Update HUD
+function updateHUD() {
+    document.getElementById('killCount').textContent = kills;
+    document.getElementById('comboCount').textContent = combo;
+}
+
+// Drawing functions with simple shapes
+function drawPlayer() {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(player.angle);
+    
+    // Player body (neon circle)
+    ctx.fillStyle = '#00ffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, player.size, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Player direction indicator
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(player.size + 5, 0);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+function drawBullets() {
+    ctx.fillStyle = '#ffff00';
+    for (const bullet of bullets) {
+        ctx.beginPath();
+        ctx.arc(bullet.x, bullet.y, bullet.size, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Bullet trail
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bullet.x, bullet.y);
+        ctx.lineTo(
+            bullet.x - Math.cos(bullet.angle) * 15,
+            bullet.y - Math.sin(bullet.angle) * 15
+        );
+        ctx.stroke();
+    }
+}
+
+function drawEnemies() {
+    for (const enemy of enemies) {
+        // Enemy body (neon square)
+        ctx.fillStyle = '#ff00ff';
+        ctx.fillRect(
+            enemy.x - enemy.size, 
+            enemy.y - enemy.size, 
+            enemy.size * 2, 
+            enemy.size * 2
+        );
+        
+        // Enemy eyes (simple dots)
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(enemy.x - 5, enemy.y - 5, 2, 0, Math.PI * 2);
+        ctx.arc(enemy.x + 5, enemy.y - 5, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawWalls() {
+    for (const wall of walls) {
+        // Wall body
+        ctx.fillStyle = '#333333';
+        ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
+        
+        // Neon border
+        ctx.strokeStyle = '#ff00ff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(wall.x, wall.y, wall.width, wall.height);
+    }
+}
+
+function drawParticles() {
+    for (const p of particles) {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life / 30;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+}
+
+// Main game loop
+function gameLoop() {
+    // Clear canvas with trail effect
+    ctx.fillStyle = 'rgba(10, 10, 10, 0.2)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Apply screen shake
+    if (shakeAmount > 0) {
+        ctx.translate(
+            (Math.random() - 0.5) * shakeAmount,
+            (Math.random() - 0.5) * shakeAmount
+        );
+        shakeAmount *= 0.9;
+    }
+    
+    // Update game objects
+    updatePlayer();
+    updateBullets();
+    updateParticles();
+    
+    // Draw everything
+    drawWalls();
+    drawEnemies();
+    drawPlayer();
+    drawBullets();
+    drawParticles();
+    
+    // Check win condition
+    if (enemies.length === 0) {
+        ctx.fillStyle = '#00ff00';
+        ctx.font = '48px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText('LEVEL CLEAR!', canvas.width/2, canvas.height/2);
+        ctx.font = '24px Courier New';
+        ctx.fillText('Press R to restart', canvas.width/2, canvas.height/2 + 50);
+        
+        if (keys['r']) {
+            kills = 0;
+            combo = 0;
+            initLevel();
+            updateHUD();
+        }
+    }
+    
+    requestAnimationFrame(gameLoop);
+}
+
+// Start the game
+initLevel();
+updateHUD();
+gameLoop();

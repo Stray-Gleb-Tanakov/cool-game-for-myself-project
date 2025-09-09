@@ -1,0 +1,33 @@
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #0a0a0a;
+    color: #ff00ff;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+}
+
+.game-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background-color: #111;
+}
+
+#gameCanvas {
+    border: 2px solid #ff00ff;
+    box-shadow: 0 0 20px #ff00ff;
+}
+
+.hud {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    font-size: 20px;
+    text-shadow: 0 0 10px #ff00ff;
+}
+
+.score, .combo {
+    margin-bottom: 10px;
+}
