@@ -1,0 +1,1724 @@
+// Wait for the DOM to be fully loaded before running the game
+document.addEventListener('DOMContentLoaded', function() {
+    // ========== GAME SETUP ==========
+    // Get canvas element and set up rendering context
+    const canvas = document.getElementById('gameCanvas');
+    
+    // Check if canvas exists
+    if (!canvas) {
+        console.error('Canvas element not found!');
+        return;
+    }
+    
+    const ctx = canvas.getContext('2d');
+    
+    // Set canvas dimensions - these are the visible area
+    canvas.width = 1200; 
+    canvas.height = 900;
+    
+    // Game world dimensions - larger than visible area for scrolling
+    // FIXED: Increased worldHeight to accommodate the level height (2760px + padding)
+    const worldWidth = 7200; 
+    const worldHeight = 3000; // Increased from 1800 to 3000 to fit the level
+    
+    // ========== WEAPON PROPERTIES ==========
+    const weaponProperties = {
+        pistol: {
+            damage: 10,
+            maxAmmo: 12,
+            reloadTime: 60,
+            fireRate: 15,
+            bulletSpeed: 15,
+            bulletRange: 500,
+            bounces: 3,
+            color: '#ffff00'
+        },
+        shotgun: {
+            damage: 5, // Per pellet
+            maxAmmo: 2,
+            reloadTime: 90,
+            fireRate: 30,
+            bulletSpeed: 12,
+            bulletRange: 300,
+            bounces: 1,
+            pelletCount: 10,
+            spreadAngle: Math.PI / 6, // 30 degrees
+            color: '#ff9900'
+        },
+        sniper: {
+            damage: 25,
+            maxAmmo: 5,
+            reloadTime: 120,
+            fireRate: 45,
+            bulletSpeed: 25,
+            bulletRange: 1000,
+            bounces: 0,
+            color: '#00ffff',
+            canPassThroughWalls: true
+        }
+    };
+    
+    // ========== ENEMY TYPES ==========
+    const enemyTypes = {
+        basic: {
+            health: 10,
+            maxHealth: 10,
+            speed: 0.7,
+            size: 15,
+            color: '#ff00ff',
+            hasKnife: true,
+            attackDamage: 10,
+            attackRange: 30,
+            detectionRange: 800
+        },
+        sniper: {
+            health: 25,
+            maxHealth: 25,
+            speed: 0.5,
+            size: 20,
+            color: '#00ff00',
+            hasKnife: false,
+            attackDamage: 15,
+            attackRange: 1000,
+            detectionRange: 1200,
+            fireRate: 90,
+            canShootThroughWalls: false, // Changed to false - enemies can't shoot through walls
+            bulletSpeed: 6 // Slower bullet speed for enemies
+        },
+        heavy: {
+            health: 40,
+            maxHealth: 40,
+            speed: 0.4,
+            size: 25,
+            color: '#ff0000',
+            hasKnife: true,
+            attackDamage: 20,
+            attackRange: 30,
+            detectionRange: 600
+        }
+    };
+    
+    // ========== CAMERA SYSTEM ==========
+    // Camera follows player to create scrolling effect
+    const camera = {
+        x: 0,
+        y: 0,
+        width: canvas.width,
+        height: canvas.height,
+        followSpeed: 0.1, // How quickly camera catches up to player
+        shakeIntensity: 0 // For screen shake effect
+    };
+    
+    // ========== PLAYER OBJECT ==========
+    // Main player character with all properties
+    let player = {
+        // FIXED: Removed fixed spawn position - will be set in initLevel
+        size: 15,
+        speed: 3, // Movement speed
+        angle: 0, // Direction player is facing
+        health: 100, // Player health points
+        maxHealth: 100, // Maximum health
+        isShooting: false,
+        shootCooldown: 0,
+        currentWeapon: 'pistol', // 'pistol', 'shotgun', or 'sniper'
+        pistolAmmo: 12,
+        shotgunAmmo: 2,
+        sniperAmmo: 5,
+        isReloading: false,
+        reloadTime: 0,
+        pistolSemiAuto: true,
+        isShotgunCocked: true,
+        isSniperReady: true,
+        isKicking: false,
+        kickCooldown: 0,
+        invulnerable: false,
+        invulnerableTime: 0,
+        isDead: false
+    };
+    
+    // ========== GAME OBJECTS ==========
+    let bullets = [];
+    let enemies = [];
+    let walls = [];
+    let doors = []; // Separate array for breakable doors
+    let particles = [];
+    let bloodSplatters = []; // Persistent blood splatters on walls
+    let kills = 0;
+    let combo = 0;
+    let lastKillTime = 0;
+    
+    // ========== INPUT HANDLING ==========
+    // Track keyboard and mouse input
+    const keys = {};
+    const mouse = { x: 0, y: 0, isDown: false, wasDown: false };
+    
+    // Event listeners for keyboard input
+    document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+    
+    // Event listeners for mouse input
+    canvas.addEventListener('mousemove', e => {
+        const rect = canvas.getBoundingClientRect();
+        mouse.x = e.clientX - rect.left;
+        mouse.y = e.clientY - rect.top;
+    });
+    
+    canvas.addEventListener('mousedown', () => {
+        mouse.isDown = true;
+        // Handle shooting for all weapons
+        if (player.shootCooldown === 0 && !player.isReloading && !player.isDead) {
+            if (player.currentWeapon === 'pistol' && player.pistolAmmo > 0 && player.pistolSemiAuto) {
+                shootPistol();
+                player.pistolAmmo--;
+                player.shootCooldown = weaponProperties.pistol.fireRate;
+                player.pistolSemiAuto = false;
+            } else if (player.currentWeapon === 'shotgun' && player.shotgunAmmo > 0 && player.isShotgunCocked) {
+                shootShotgun();
+                player.shotgunAmmo--;
+                player.shootCooldown = weaponProperties.shotgun.fireRate;
+                player.isShotgunCocked = false;
+            } else if (player.currentWeapon === 'sniper' && player.sniperAmmo > 0 && player.isSniperReady) {
+                shootSniper();
+                player.sniperAmmo--;
+                player.shootCooldown = weaponProperties.sniper.fireRate;
+                player.isSniperReady = false;
+            }
+        }
+    });
+    
+    canvas.addEventListener('mouseup', () => {
+        mouse.isDown = false;
+        player.pistolSemiAuto = true; // Reset semi-auto flag when mouse is released
+    });
+    
+    // ========== LEVEL INITIALIZATION ==========
+    // Creates walls, doors, and enemies for the level based on ASCII art
+    function initLevel() {
+        // Clear existing arrays
+        walls = [];
+        doors = [];
+        enemies = [];
+        bloodSplatters = [];
+        
+        // ASCII level layout
+        const levelLayout = [
+"####################################################################################################",
+"#...............#.......................#.......................#.......................#........#",
+"#..P......E.....+........E.............+...........E...........+..............E........+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"#######..##########..##########..##########..##########..##########..##########..##########..#####",
+"#       +#          +#          +#          +#          +#          +#          +#          +#    #",
+"#   E     #   .E.     #   .!.     #   .E.     #   .-.     #   E      #   .-.     #   .E.     # E  #",
+"#         +#          +#          +#          +#          +#          +#          +#          +#  #",
+"#######..##########..##########..##########..##########..##########..##########..##########..#####",
+"#...............#.......................#.......................#.......................#.......#",
+"#..E............+.............E.......+..............E........+...........E...........+.......!#",
+"#...............#.......................#.......................#.......................#.......#",
+"##########..##########..##########..##########..##########..##########..##########..##########..#",
+"#          +#          +#          +#          +#          +#          +#          +#          +#",
+"#   E      #   .!.     #   .E.     #   .-.-.    #   E      #   .!.     #   .E.     #   .-.     #  #",
+"#          +#          +#          +#          +#          +#          +#          +#          +#",
+"##########..##########..##########..##########..##########..##########..##########..##########..#",
+"#...............#.......................#.......................#.......................#.......#",
+"#.......E.......+...............E.......+...............!.......+...............E.......+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"#################x########################x########################x########################x######",
+"#...............#.......................#.......................#.......................#.......#",
+"#.......E.......+...........E...........+...............E.......+...............!.......+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"####################################################################################################",
+"#...............#.......................#.......................#.......................#.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"#.......E.......+...............!.......+...............E.......+...............!.......+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"#######..##########..##########..##########..##########..##########..##########..##########..#####",
+"#       +#          +#          +#          +#          +#          +#          +#          +#    #",
+"#   E     #   .-.     #   .!.     #   E      #   .-.-.    #   .!.     #   E      #   .-.     # E  #",
+"#         +#          +#          +#          +#          +#          +#          +#          +#  #",
+"#######..##########..##########..##########..##########..##########..##########..##########..#####",
+"#...............#.......................#.......................#.......................#.......#",
+"#.......E.......+...............E.......+...............!.......+...............E.......+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"#################x########################x########################x########################x######",
+"#...............#.......................#.......................#.......................#.......#",
+"#.......E.......+...........E...........+...............E.......+...............!.......+.......#",
+"#...............#.......................#.......................#.......................#.......#",
+"####################################################################################################",
+"#...............#.......................#.......................#.......................#.......#",
+"#..E............+.............E.......+..............E........+...........E...........+.......>#",
+"#...............#.......................#.......................#.......................#.......#",
+"####################################################################################################",
+];
+        
+        // Tile size - each character in the ASCII map represents a 60x60 pixel tile
+        const tileSize = 60;
+        
+        // Calculate level dimensions
+        const levelWidth = levelLayout[0].length * tileSize;
+        const levelHeight = levelLayout.length * tileSize;
+        
+        // FIXED: Calculate offset to center the level in the game world
+        const offsetX = (worldWidth - levelWidth) / 2;
+        const offsetY = (worldHeight - levelHeight) / 2;
+        
+        // DEBUG: Log level dimensions and offsets
+        console.log(`Level dimensions: ${levelWidth}x${levelHeight}`);
+        console.log(`World dimensions: ${worldWidth}x${worldHeight}`);
+        console.log(`Level offset: ${offsetX}x${offsetY}`);
+        
+        // Flag to track if player spawn point was found
+        let playerSpawned = false;
+        
+        // Parse the level layout
+        for (let row = 0; row < levelLayout.length; row++) {
+            for (let col = 0; col < levelLayout[row].length; col++) {
+                const char = levelLayout[row][col];
+                const x = offsetX + col * tileSize;
+                const y = offsetY + row * tileSize;
+                
+                switch (char) {
+                    case '#': // Wall
+                        walls.push({ 
+                            x: x, 
+                            y: y, 
+                            width: tileSize, 
+                            height: tileSize, 
+                            type: 'interior' 
+                        });
+                        break;
+                        
+                    case '+': // Doorway
+                        doors.push({ 
+                            x: x, 
+                            y: y, 
+                            width: tileSize, 
+                            height: tileSize, 
+                            health: 2, 
+                            maxHealth: 2, 
+                            isBroken: false 
+                        });
+                        break;
+                        
+                    case 'x': // Locked door
+                        doors.push({ 
+                            x: x, 
+                            y: y, 
+                            width: tileSize, 
+                            height: tileSize, 
+                            health: 5, 
+                            maxHealth: 5, 
+                            isBroken: false 
+                        });
+                        break;
+                        
+                    case 'P': // Player spawn
+                        player.x = x + tileSize / 2;
+                        player.y = y + tileSize / 2;
+                        playerSpawned = true;
+                        // DEBUG: Log player spawn position
+                        console.log(`Player spawned at: ${player.x}, ${player.y}`);
+                        break;
+                        
+                    case 'E': // Enemy spawn
+                        // Randomly assign enemy type
+                        const enemyType = Math.random() < 0.5 ? 'basic' : (Math.random() < 0.8 ? 'sniper' : 'heavy');
+                        enemies.push({ 
+                            x: x + tileSize / 2, 
+                            y: y + tileSize / 2, 
+                            type: enemyType, 
+                            angle: 0, 
+                            attackCooldown: 0 
+                        });
+                        break;
+                        
+                    case '!': // Weapon pickup (ignore for now)
+                        // Could add weapon pickups here later
+                        break;
+                        
+                    case '>': // Exit (ignore for now)
+                        // Could add exit condition here later
+                        break;
+                }
+            }
+        }
+        
+        // FIXED: Check if player spawn point was found
+        if (!playerSpawned) {
+            console.warn('Player spawn point (P) not found in level layout!');
+            // Fallback to center of first room
+            player.x = offsetX + tileSize * 3 + tileSize / 2;
+            player.y = offsetY + tileSize * 3 + tileSize / 2;
+            console.log(`Player spawned at fallback position: ${player.x}, ${player.y}`);
+        }
+        
+        // Apply enemy type properties
+        for (const enemy of enemies) {
+            const type = enemyTypes[enemy.type];
+            Object.assign(enemy, {
+                health: type.health,
+                maxHealth: type.maxHealth,
+                speed: type.speed,
+                size: type.size,
+                color: type.color,
+                hasKnife: type.hasKnife,
+                attackDamage: type.attackDamage,
+                attackRange: type.attackRange,
+                detectionRange: type.detectionRange,
+                fireRate: type.fireRate || 60,
+                canShootThroughWalls: type.canShootThroughWalls || false,
+                bulletSpeed: type.bulletSpeed || 10
+            });
+        }
+    }
+    
+    // ========== PLAYER UPDATE FUNCTION ==========
+    // Updates player position, handles player actions
+    function updatePlayer() {
+        // If player is dead, don't update
+        if (player.isDead) return;
+        
+        // Handle weapon switching with keys '1', '2', '3'
+        if (keys['1']) {
+            player.currentWeapon = 'pistol';
+            keys['1'] = false;
+        }
+        if (keys['2']) {
+            player.currentWeapon = 'shotgun';
+            keys['2'] = false;
+        }
+        if (keys['3']) {
+            player.currentWeapon = 'sniper';
+            keys['3'] = false;
+        }
+        
+        // Handle reloading with key 'R'
+        if (keys['r'] && !player.isReloading) {
+            const weapon = player.currentWeapon;
+            if (weapon === 'pistol' && player.pistolAmmo < weaponProperties.pistol.maxAmmo) {
+                player.isReloading = true;
+                player.reloadTime = weaponProperties.pistol.reloadTime;
+            } else if (weapon === 'shotgun' && player.shotgunAmmo < weaponProperties.shotgun.maxAmmo) {
+                player.isReloading = true;
+                player.reloadTime = weaponProperties.shotgun.reloadTime;
+            } else if (weapon === 'sniper' && player.sniperAmmo < weaponProperties.sniper.maxAmmo) {
+                player.isReloading = true;
+                player.reloadTime = weaponProperties.sniper.reloadTime;
+            }
+        }
+        
+        // Handle shotgun cocking with key 'C'
+        if (keys['c'] && player.currentWeapon === 'shotgun' && !player.isShotgunCocked) {
+            player.isShotgunCocked = true;
+            createParticles(player.x, player.y, '#ff9900', 5, 2);
+        }
+        
+        // Handle sniper ready with key 'V'
+        if (keys['v'] && player.currentWeapon === 'sniper' && !player.isSniperReady) {
+            player.isSniperReady = true;
+            createParticles(player.x, player.y, '#00ffff', 5, 2);
+        }
+        
+        // Handle kicking with key 'F'
+        if (keys['f'] && player.kickCooldown === 0) {
+            playerKick();
+            player.kickCooldown = 30;
+        }
+        
+        // Update reloading state
+        if (player.isReloading) {
+            player.reloadTime--;
+            if (player.reloadTime <= 0) {
+                const weapon = player.currentWeapon;
+                if (weapon === 'pistol') {
+                    player.pistolAmmo = weaponProperties.pistol.maxAmmo;
+                } else if (weapon === 'shotgun') {
+                    player.shotgunAmmo = weaponProperties.shotgun.maxAmmo;
+                } else if (weapon === 'sniper') {
+                    player.sniperAmmo = weaponProperties.sniper.maxAmmo;
+                }
+                player.isReloading = false;
+            }
+        }
+        
+        // Update kick cooldown
+        if (player.kickCooldown > 0) player.kickCooldown--;
+        
+        // Update invulnerability after taking damage
+        if (player.invulnerable) {
+            player.invulnerableTime--;
+            if (player.invulnerableTime <= 0) {
+                player.invulnerable = false;
+            }
+        }
+        
+        // Calculate movement based on WASD keys
+        let dx = 0, dy = 0;
+        if (keys['w']) dy -= player.speed;
+        if (keys['s']) dy += player.speed;
+        if (keys['a']) dx -= player.speed;
+        if (keys['d']) dx += player.speed;
+        
+        // Normalize diagonal movement to prevent faster speed
+        if (dx !== 0 && dy !== 0) {
+            dx *= 0.707;
+            dy *= 0.707;
+        }
+        
+        // Check wall collisions before moving
+        const newX = player.x + dx;
+        const newY = player.y + dy;
+        
+        let canMoveX = true;
+        let canMoveY = true;
+        
+        // Check collision with regular walls
+        for (const wall of walls) {
+            if (newX - player.size < wall.x + wall.width &&
+                newX + player.size > wall.x &&
+                player.y - player.size < wall.y + wall.height &&
+                player.y + player.size > wall.y) {
+                canMoveX = false;
+            }
+            
+            if (player.x - player.size < wall.x + wall.width &&
+                player.x + player.size > wall.x &&
+                newY - player.size < wall.y + wall.height &&
+                newY + player.size > wall.y) {
+                canMoveY = false;
+            }
+        }
+        
+        // Check collision with doors (only if not broken)
+        for (const door of doors) {
+            if (!door.isBroken) {
+                if (newX - player.size < door.x + door.width &&
+                    newX + player.size > door.x &&
+                    player.y - player.size < door.y + door.height &&
+                    player.y + player.size > door.y) {
+                    canMoveX = false;
+                }
+                
+                if (player.x - player.size < door.x + door.width &&
+                    player.x + player.size > door.x &&
+                    newY - player.size < door.y + door.height &&
+                    newY + player.size > door.y) {
+                    canMoveY = false;
+                }
+            }
+        }
+        
+        // Apply movement if no collision
+        if (canMoveX) player.x = newX;
+        if (canMoveY) player.y = newY;
+        
+        // Keep player in bounds of game world
+        player.x = Math.max(player.size, Math.min(worldWidth - player.size, player.x));
+        player.y = Math.max(player.size, Math.min(worldHeight - player.size, player.y));
+        
+        // Calculate angle to mouse - Convert mouse position to world coordinates
+        const mouseWorldX = mouse.x + camera.x;
+        const mouseWorldY = mouse.y + camera.y;
+        player.angle = Math.atan2(mouseWorldY - player.y, mouseWorldX - player.x);
+        
+        // Update shooting cooldown
+        if (player.shootCooldown > 0) player.shootCooldown--;
+    }
+    
+    // ========== PLAYER KICK FUNCTION ==========
+    // Handles player kicking action to break doors
+    function playerKick() {
+        player.isKicking = true;
+        
+        // Check for doors in front of player
+        const kickDistance = 50; // How far player can kick
+        const kickX = player.x + Math.cos(player.angle) * kickDistance;
+        const kickY = player.y + Math.sin(player.angle) * kickDistance;
+        
+        // Create kick effect
+        createParticles(kickX, kickY, '#ffffff', 10, 3);
+        
+        // Check if any doors are in kick range
+        for (const door of doors) {
+            if (!door.isBroken &&
+                kickX > door.x && 
+                kickX < door.x + door.width &&
+                kickY > door.y && 
+                kickY < door.y + door.height) {
+                
+                // Damage the door
+                door.health--;
+                
+                // Create impact effect
+                createParticles(door.x + door.width/2, door.y + door.height/2, '#ffff00', 15, 4);
+                
+                // Check if door is broken
+                if (door.health <= 0) {
+                    door.isBroken = true;
+                    // Create door break effect
+                    createParticles(door.x + door.width/2, door.y + door.height/2, '#ff9900', 30, 6);
+                    shakeScreen(10); // Screen shake when door breaks
+                }
+                
+                break; // Only break one door per kick
+            }
+        }
+        
+        // Reset kick animation after a short delay
+        setTimeout(() => {
+            player.isKicking = false;
+        }, 200);
+    }
+    
+    // ========== CAMERA UPDATE FUNCTION ==========
+    // Updates camera position to follow player
+    function updateCamera() {
+        // FIXED: Immediately center camera on player on first frame
+        if (camera.x === 0 && camera.y === 0) {
+            camera.x = player.x - camera.width / 2;
+            camera.y = player.y - camera.height / 2;
+            
+            // Clamp to world bounds
+            camera.x = Math.max(0, Math.min(worldWidth - camera.width, camera.x));
+            camera.y = Math.max(0, Math.min(worldHeight - camera.height, camera.y));
+            
+            // DEBUG: Log initial camera position
+            console.log(`Camera initialized at: ${camera.x}, ${camera.y}`);
+            return;
+        }
+
+        // Calculate target position (centered on player)
+        const targetX = player.x - camera.width / 2;
+        const targetY = player.y - camera.height / 2;
+        
+        // Smoothly move camera towards target
+        camera.x += (targetX - camera.x) * camera.followSpeed;
+        camera.y += (targetY - camera.y) * camera.followSpeed;
+        
+        // Keep camera within world bounds
+        camera.x = Math.max(0, Math.min(worldWidth - camera.width, camera.x));
+        camera.y = Math.max(0, Math.min(worldHeight - camera.height, camera.y));
+    }
+    
+    // ========== ENEMY UPDATE FUNCTION ==========
+    // Updates enemy positions and behaviors with improved pathfinding
+    function updateEnemies() {
+        for (const enemy of enemies) {
+            // Calculate direction to player
+            const dx = player.x - enemy.x;
+            const dy = player.y - enemy.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            // Only move if player is within detection range
+            if (distance < enemy.detectionRange) {
+                // Normalize direction vector
+                const dirX = dx / distance;
+                const dirY = dy / distance;
+                
+                // Check if direct path to player is blocked
+                let pathBlocked = false;
+                const checkDistance = 50; // How far to check ahead
+                
+                // Check for walls in the path
+                for (const wall of walls) {
+                    // Calculate if the path to player intersects with this wall
+                    const pathEndX = enemy.x + dirX * checkDistance;
+                    const pathEndY = enemy.y + dirY * checkDistance;
+                    
+                    // Simple line-rectangle intersection
+                    if (lineIntersectsRect(
+                        enemy.x, enemy.y, pathEndX, pathEndY,
+                        wall.x, wall.y, wall.x + wall.width, wall.y + wall.height
+                    )) {
+                        pathBlocked = true;
+                        break;
+                    }
+                }
+                
+                // Check for unbroken doors in the path
+                if (!pathBlocked) {
+                    for (const door of doors) {
+                        if (!door.isBroken) {
+                            const pathEndX = enemy.x + dirX * checkDistance;
+                            const pathEndY = enemy.y + dirY * checkDistance;
+                            
+                            if (lineIntersectsRect(
+                                enemy.x, enemy.y, pathEndX, pathEndY,
+                                door.x, door.y, door.x + door.width, door.y + door.height
+                            )) {
+                                pathBlocked = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Calculate new position
+                let newX, newY;
+                
+                if (pathBlocked) {
+                    // Path is blocked, try to move perpendicular to the wall
+                    // Find the closest wall
+                    let closestWall = null;
+                    let closestDist = Infinity;
+                    
+                    // Check all walls
+                    for (const wall of walls) {
+                        const wallCenterX = wall.x + wall.width / 2;
+                        const wallCenterY = wall.y + wall.height / 2;
+                        const wallDist = Math.sqrt(
+                            Math.pow(enemy.x - wallCenterX, 2) + 
+                            Math.pow(enemy.y - wallCenterY, 2)
+                        );
+                        
+                        if (wallDist < closestDist) {
+                            closestDist = wallDist;
+                            closestWall = wall;
+                        }
+                    }
+                    
+                    // Check all unbroken doors
+                    for (const door of doors) {
+                        if (!door.isBroken) {
+                            const doorCenterX = door.x + door.width / 2;
+                            const doorCenterY = door.y + door.height / 2;
+                            const doorDist = Math.sqrt(
+                                Math.pow(enemy.x - doorCenterX, 2) + 
+                                Math.pow(enemy.y - doorCenterY, 2)
+                            );
+                            
+                            if (doorDist < closestDist) {
+                                closestDist = doorDist;
+                                closestWall = door;
+                            }
+                        }
+                    }
+                    
+                    if (closestWall) {
+                        // Calculate perpendicular direction to avoid the wall
+                        const wallCenterX = closestWall.x + closestWall.width / 2;
+                        const wallCenterY = closestWall.y + closestWall.height / 2;
+                        
+                        // Vector from wall to enemy
+                        const avoidX = enemy.x - wallCenterX;
+                        const avoidY = enemy.y - wallCenterY;
+                        
+                        // Normalize
+                        const avoidDist = Math.sqrt(avoidX * avoidX + avoidY * avoidY);
+                        const avoidDirX = avoidX / avoidDist;
+                        const avoidDirY = avoidY / avoidDist;
+                        
+                        // Move perpendicular to the wall
+                        newX = enemy.x + avoidDirX * enemy.speed;
+                        newY = enemy.y + avoidDirY * enemy.speed;
+                    } else {
+                        // Fallback to direct movement
+                        newX = enemy.x + dirX * enemy.speed;
+                        newY = enemy.y + dirY * enemy.speed;
+                    }
+                } else {
+                    // Path is clear, move directly towards player
+                    newX = enemy.x + dirX * enemy.speed;
+                    newY = enemy.y + dirY * enemy.speed;
+                }
+                
+                // Check if enemy can move without hitting walls or doors
+                let canMove = true;
+                
+                // Check collision with regular walls
+                for (const wall of walls) {
+                    if (newX - enemy.size < wall.x + wall.width &&
+                        newX + enemy.size > wall.x &&
+                        newY - enemy.size < wall.y + wall.height &&
+                        newY + enemy.size > wall.y) {
+                        canMove = false;
+                        break;
+                    }
+                }
+                
+                // Check collision with doors (only if not broken)
+                for (const door of doors) {
+                    if (!door.isBroken) {
+                        if (newX - enemy.size < door.x + door.width &&
+                            newX + enemy.size > door.x &&
+                            newY - enemy.size < door.y + door.height &&
+                            newY + enemy.size > door.y) {
+                            canMove = false;
+                            break;
+                        }
+                    }
+                }
+                
+                // Apply movement if no collision
+                if (canMove) {
+                    enemy.x = newX;
+                    enemy.y = newY;
+                }
+                
+                // Update enemy angle to face player
+                enemy.angle = Math.atan2(dy, dx);
+                
+                // Enemy attack behavior
+                if (enemy.type === 'basic' || enemy.type === 'heavy') {
+                    // Melee attack for basic and heavy enemies
+                    if (enemy.hasKnife && distance < enemy.attackRange) {
+                        if (enemy.attackCooldown <= 0) {
+                            enemyAttack(enemy);
+                            enemy.attackCooldown = 60;
+                        }
+                    }
+                } else if (enemy.type === 'sniper') {
+                    // Ranged attack for sniper enemies
+                    if (distance < enemy.attackRange && enemy.attackCooldown <= 0) {
+                        enemyShoot(enemy);
+                        enemy.attackCooldown = enemy.fireRate;
+                    }
+                }
+                
+                // Update attack cooldown
+                if (enemy.attackCooldown > 0) enemy.attackCooldown--;
+            }
+        }
+    }
+    
+    // ========== ENEMY SHOOT FUNCTION ==========
+    function enemyShoot(enemy) {
+        // Create a bullet from enemy to player
+        const angle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+        
+        bullets.push({
+            x: enemy.x,
+            y: enemy.y,
+            angle: angle,
+            speed: enemy.bulletSpeed, // Use enemy's bullet speed (now slower)
+            size: 5,
+            distance: 0,
+            maxDistance: 1000,
+            bounces: 0,
+            damage: enemy.attackDamage,
+            weapon: 'enemy',
+            canPassThroughWalls: enemy.canShootThroughWalls, // Now false for all enemies
+            isEnemyBullet: true
+        });
+        
+        // Muzzle flash effect
+        createParticles(enemy.x, enemy.y, '#ff0000', 5, 2);
+    }
+    
+    // ========== LINE-RECTANGLE INTERSECTION HELPER FUNCTION ==========
+    // Checks if a line segment intersects with a rectangle
+    function lineIntersectsRect(x1, y1, x2, y2, rectX1, rectY1, rectX2, rectY2) {
+        // Check if line endpoints are inside rectangle
+        if ((x1 >= rectX1 && x1 <= rectX2 && y1 >= rectY1 && y1 <= rectY2) ||
+            (x2 >= rectX1 && x2 <= rectX2 && y2 >= rectY1 && y2 <= rectY2)) {
+            return true;
+        }
+        
+        // Check line intersection with rectangle edges
+        // Left edge
+        if (lineIntersectsLine(x1, y1, x2, y2, rectX1, rectY1, rectX1, rectY2)) return true;
+        // Right edge
+        if (lineIntersectsLine(x1, y1, x2, y2, rectX2, rectY1, rectX2, rectY2)) return true;
+        // Top edge
+        if (lineIntersectsLine(x1, y1, x2, y2, rectX1, rectY1, rectX2, rectY1)) return true;
+        // Bottom edge
+        if (lineIntersectsLine(x1, y1, x2, y2, rectX1, rectY2, rectX2, rectY2)) return true;
+        
+        return false;
+    }
+    
+    // ========== LINE-LINE INTERSECTION HELPER FUNCTION ==========
+    // Checks if two line segments intersect
+    function lineIntersectsLine(x1, y1, x2, y2, x3, y3, x4, y4) {
+        const denominator = ((y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1));
+        if (denominator === 0) return false;
+        
+        const ua = (((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denominator);
+        const ub = (((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denominator);
+        
+        return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1;
+    }
+    
+    // ========== ENEMY ATTACK FUNCTION ==========
+    // Handles enemy attacking the player
+    function enemyAttack(enemy) {
+        // Check if player is vulnerable
+        if (!player.invulnerable && !player.isDead) {
+            // Apply damage to player
+            player.health -= enemy.attackDamage;
+            
+            // Make player invulnerable for a short time
+            player.invulnerable = true;
+            player.invulnerableTime = 60; // 1 second of invulnerability
+            
+            // Create blood splatter effect
+            createBloodSplatter(player.x, player.y, 5);
+            
+            // Screen shake effect
+            shakeScreen(10);
+            
+            // Update HUD to show health change
+            updateHUD();
+            
+            // Check if player is dead
+            if (player.health <= 0) {
+                playerDeath();
+            }
+        }
+        
+        // Visual effect for enemy attack
+        createParticles(enemy.x, enemy.y, '#ff0000', 10, 4);
+    }
+    
+    // ========== PLAYER DEATH FUNCTION ==========
+    // Handles player death
+    function playerDeath() {
+        player.isDead = true;
+        
+        // Create large blood splatter
+        createBloodSplatter(player.x, player.y, 20);
+        
+        // Screen shake effect
+        shakeScreen(20);
+    }
+    
+    // ========== BLOOD SPLATTER FUNCTION ==========
+    // Creates persistent blood splatter effects
+    function createBloodSplatter(x, y, intensity) {
+        // Create multiple blood particles
+        for (let i = 0; i < intensity * 5; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const distance = Math.random() * 50;
+            const splatterX = x + Math.cos(angle) * distance;
+            const splatterY = y + Math.sin(angle) * distance;
+            const size = Math.random() * 10 + 5;
+            
+            // Add to persistent blood splatters array
+            bloodSplatters.push({
+                x: splatterX,
+                y: splatterY,
+                size: size,
+                color: `rgba(${150 + Math.random() * 50}, 0, 0, ${0.5 + Math.random() * 0.5})`
+            });
+        }
+        
+        // Also create temporary blood particles
+        createParticles(x, y, '#ff0000', intensity * 10, 5);
+    }
+    
+    // ========== PISTOL SHOOTING FUNCTION ==========
+    // Handles pistol shooting mechanics
+    function shootPistol() {
+        bullets.push({
+            x: player.x,
+            y: player.y,
+            angle: player.angle,
+            speed: weaponProperties.pistol.bulletSpeed,
+            size: 4,
+            distance: 0,
+            maxDistance: weaponProperties.pistol.bulletRange,
+            bounces: weaponProperties.pistol.bounces,
+            damage: weaponProperties.pistol.damage,
+            weapon: 'pistol',
+            canPassThroughWalls: false
+        });
+        
+        // Muzzle flash effect
+        createParticles(player.x, player.y, weaponProperties.pistol.color, 5, 2);
+    }
+    
+    // ========== SHOTGUN SHOOTING FUNCTION ==========
+    // Handles shotgun shooting mechanics
+    function shootShotgun() {
+        const pelletCount = weaponProperties.shotgun.pelletCount;
+        const spreadAngle = weaponProperties.shotgun.spreadAngle;
+        
+        for (let i = 0; i < pelletCount; i++) {
+            const angleOffset = (i - pelletCount/2) * spreadAngle / pelletCount;
+            bullets.push({
+                x: player.x,
+                y: player.y,
+                angle: player.angle + angleOffset,
+                speed: weaponProperties.shotgun.bulletSpeed,
+                size: 3,
+                distance: 0,
+                maxDistance: weaponProperties.shotgun.bulletRange,
+                bounces: weaponProperties.shotgun.bounces,
+                damage: weaponProperties.shotgun.damage,
+                weapon: 'shotgun',
+                canPassThroughWalls: false
+            });
+        }
+        
+        // Muzzle flash effect
+        createParticles(player.x, player.y, weaponProperties.shotgun.color, 10, 3);
+    }
+    
+    // ========== SNIPER SHOOTING FUNCTION ==========
+    function shootSniper() {
+        bullets.push({
+            x: player.x,
+            y: player.y,
+            angle: player.angle,
+            speed: weaponProperties.sniper.bulletSpeed,
+            size: 6,
+            distance: 0,
+            maxDistance: weaponProperties.sniper.bulletRange,
+            bounces: weaponProperties.sniper.bounces,
+            damage: weaponProperties.sniper.damage,
+            weapon: 'sniper',
+            canPassThroughWalls: true
+        });
+        
+        // Muzzle flash effect
+        createParticles(player.x, player.y, weaponProperties.sniper.color, 8, 4);
+        shakeScreen(5);
+    }
+    
+    // ========== PARTICLE SYSTEM ==========
+    // Creates particle effects for visual feedback
+    function createParticles(x, y, color, count, speed) {
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            particles.push({
+                x: x,
+                y: y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                size: Math.random() * 3 + 1,
+                color: color,
+                life: 30
+            });
+        }
+    }
+    
+    // ========== BULLET UPDATE FUNCTION ==========
+    // Updates bullet positions and handles collisions
+    function updateBullets() {
+        for (let i = bullets.length - 1; i >= 0; i--) {
+            const bullet = bullets[i];
+            
+            // Move bullet
+            bullet.x += Math.cos(bullet.angle) * bullet.speed;
+            bullet.y += Math.sin(bullet.angle) * bullet.speed;
+            bullet.distance += bullet.speed;
+            
+            // Remove if out of range
+            if (bullet.distance > bullet.maxDistance) {
+                bullets.splice(i, 1);
+                continue;
+            }
+            
+            // Check wall collisions with bounce (unless bullet can pass through walls)
+            if (!bullet.canPassThroughWalls) {
+                let hitWall = false;
+                for (const wall of walls) {
+                    if (bullet.x + bullet.size > wall.x && 
+                        bullet.x - bullet.size < wall.x + wall.width &&
+                        bullet.y + bullet.size > wall.y && 
+                        bullet.y - bullet.size < wall.y + wall.height) {
+                        
+                        // Determine which side of the wall was hit
+                        const bulletLeft = bullet.x - bullet.size;
+                        const bulletRight = bullet.x + bullet.size;
+                        const bulletTop = bullet.y - bullet.size;
+                        const bulletBottom = bullet.y + bullet.size;
+                        
+                        const wallLeft = wall.x;
+                        const wallRight = wall.x + wall.width;
+                        const wallTop = wall.y;
+                        const wallBottom = wall.y + wall.height;
+                        
+                        // Calculate overlap on each side
+                        const overlapLeft = bulletRight - wallLeft;
+                        const overlapRight = wallRight - bulletLeft;
+                        const overlapTop = bulletBottom - wallTop;
+                        const overlapBottom = wallBottom - bulletTop;
+                        
+                        // Find the minimum overlap
+                        const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+                        
+                        // Bounce based on which side was hit
+                        if (minOverlap === overlapLeft || minOverlap === overlapRight) {
+                            // Hit left or right side, bounce horizontally
+                            bullet.angle = Math.PI - bullet.angle;
+                        } else {
+                            // Hit top or bottom side, bounce vertically
+                            bullet.angle = -bullet.angle;
+                        }
+                        
+                        // Move bullet outside of wall to prevent sticking
+                        if (minOverlap === overlapLeft) {
+                            bullet.x = wallLeft - bullet.size;
+                        } else if (minOverlap === overlapRight) {
+                            bullet.x = wallRight + bullet.size;
+                        } else if (minOverlap === overlapTop) {
+                            bullet.y = wallTop - bullet.size;
+                        } else {
+                            bullet.y = wallBottom + bullet.size;
+                        }
+                        
+                        // Create impact effect
+                        createParticles(bullet.x, bullet.y, '#ff00ff', 5, 2);
+                        
+                        // Decrease bounce count
+                        bullet.bounces--;
+                        if (bullet.bounces <= 0) {
+                            bullets.splice(i, 1);
+                        }
+                        
+                        hitWall = true;
+                        break;
+                    }
+                }
+                
+                if (hitWall) continue;
+            }
+            
+            // Check door collisions (unless bullet can pass through walls)
+            if (!bullet.canPassThroughWalls) {
+                for (const door of doors) {
+                    if (!door.isBroken &&
+                        bullet.x + bullet.size > door.x && 
+                        bullet.x - bullet.size < door.x + door.width &&
+                        bullet.y + bullet.size > door.y && 
+                        bullet.y - bullet.size < door.y + door.height) {
+                        
+                        // Damage the door
+                        door.health--;
+                        
+                        // Create impact effect
+                        createParticles(bullet.x, bullet.y, '#ffff00', 10, 3);
+                        
+                        // Check if door is broken
+                        if (door.health <= 0) {
+                            door.isBroken = true;
+                            // Create door break effect
+                            createParticles(door.x + door.width/2, door.y + door.height/2, '#ff9900', 30, 6);
+                            shakeScreen(10); // Screen shake when door breaks
+                        }
+                        
+                        // Remove bullet
+                        bullets.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+            
+            // Check enemy collisions (only for player bullets)
+            if (!bullet.isEnemyBullet) {
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    const dx = bullet.x - enemy.x;
+                    const dy = bullet.y - enemy.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < bullet.size + enemy.size) {
+                        // Apply damage to enemy
+                        enemy.health -= bullet.damage;
+                        
+                        // Create impact effect
+                        createParticles(bullet.x, bullet.y, '#ff0000', 5, 2);
+                        
+                        // Check if enemy is dead
+                        if (enemy.health <= 0) {
+                            enemies.splice(j, 1);
+                            kills++;
+                            
+                            // Combo system
+                            const now = Date.now();
+                            if (now - lastKillTime < 2000) {
+                                combo++;
+                            } else {
+                                combo = 1;
+                            }
+                            lastKillTime = now;
+                            
+                            // Blood splatter when enemy dies
+                            createBloodSplatter(enemy.x, enemy.y, 10);
+                            
+                            // Screen shake
+                            shakeScreen(5);
+                            
+                            updateHUD();
+                        }
+                        
+                        // Remove bullet (unless it can pass through enemies)
+                        if (!bullet.canPassThroughWalls) {
+                            bullets.splice(i, 1);
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Check player collisions (only for enemy bullets)
+            if (bullet.isEnemyBullet) {
+                const dx = bullet.x - player.x;
+                const dy = bullet.y - player.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < bullet.size + player.size) {
+                    // Apply damage to player
+                    if (!player.invulnerable && !player.isDead) {
+                        player.health -= bullet.damage;
+                        
+                        // Make player invulnerable for a short time
+                        player.invulnerable = true;
+                        player.invulnerableTime = 60;
+                        
+                        // Create blood splatter effect
+                        createBloodSplatter(player.x, player.y, 5);
+                        
+                        // Screen shake effect
+                        shakeScreen(10);
+                        
+                        // Update HUD
+                        updateHUD();
+                        
+                        // Check if player is dead
+                        if (player.health <= 0) {
+                            playerDeath();
+                        }
+                    }
+                    
+                    // Remove bullet
+                    bullets.splice(i, 1);
+                }
+            }
+        }
+    }
+    
+    // ========== PARTICLE UPDATE FUNCTION ==========
+    // Updates particle positions and removes expired particles
+    function updateParticles() {
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+            
+            if (p.life <= 0) {
+                particles.splice(i, 1);
+            }
+        }
+    }
+    
+    // ========== SCREEN SHAKE FUNCTION ==========
+    // Creates screen shake effect for impact feedback
+    function shakeScreen(intensity) {
+        camera.shakeIntensity = intensity;
+    }
+    
+    // ========== DRAWING FUNCTIONS ==========
+    
+    // Draw walls with building-like appearance
+    function drawWalls() {
+        for (const wall of walls) {
+            // Only draw walls that are visible in camera view
+            if (wall.x + wall.width > camera.x && 
+                wall.x < camera.x + camera.width &&
+                wall.y + wall.height > camera.y && 
+                wall.y < camera.y + camera.height) {
+                
+                // Wall body - different colors and patterns for different wall types
+                if (wall.type === 'exterior') {
+                    // Exterior walls - concrete-like appearance with more detail
+                    ctx.fillStyle = '#444444';
+                    ctx.fillRect(wall.x - camera.x, wall.y - camera.y, wall.width, wall.height);
+                    
+                    // Add concrete texture pattern
+                    ctx.fillStyle = '#555555';
+                    for (let i = 0; i < wall.width; i += 20) {
+                        for (let j = 0; j < wall.height; j += 20) {
+                            if ((i + j) % 40 === 0) {
+                                ctx.fillRect(wall.x + i - camera.x, wall.y + j - camera.y, 10, 10);
+                            }
+                        }
+                    }
+                    
+                    // Add some cracks to exterior walls
+                    ctx.strokeStyle = '#333333';
+                    ctx.lineWidth = 1;
+                    for (let i = 0; i < 5; i++) {
+                        const startX = wall.x + Math.random() * wall.width;
+                        const startY = wall.y + Math.random() * wall.height;
+                        const endX = startX + (Math.random() - 0.5) * 40;
+                        const endY = startY + (Math.random() - 0.5) * 40;
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(startX - camera.x, startY - camera.y);
+                        ctx.lineTo(endX - camera.x, endY - camera.y);
+                        ctx.stroke();
+                    }
+                } else {
+                    // Interior walls - brick-like appearance
+                    ctx.fillStyle = '#774400';
+                    ctx.fillRect(wall.x - camera.x, wall.y - camera.y, wall.width, wall.height);
+                    
+                    // Add brick pattern
+                    ctx.strokeStyle = '#553300';
+                    ctx.lineWidth = 1;
+                    
+                    // Horizontal mortar lines
+                    for (let j = 0; j < wall.height; j += 15) {
+                        ctx.beginPath();
+                        ctx.moveTo(wall.x - camera.x, wall.y + j - camera.y);
+                        ctx.lineTo(wall.x + wall.width - camera.x, wall.y + j - camera.y);
+                        ctx.stroke();
+                    }
+                    
+                    // Vertical mortar lines (staggered)
+                    for (let i = 0; i < wall.width; i += 30) {
+                        for (let j = 0; j < wall.height; j += 30) {
+                            ctx.beginPath();
+                            ctx.moveTo(wall.x + i - camera.x, wall.y + j - camera.y);
+                            ctx.lineTo(wall.x + i - camera.x, wall.y + j + 15 - camera.y);
+                            ctx.stroke();
+                        }
+                    }
+                    
+                    // Add some paint peeling effect
+                    ctx.fillStyle = '#885500';
+                    for (let i = 0; i < 3; i++) {
+                        const peelX = wall.x + Math.random() * wall.width;
+                        const peelY = wall.y + Math.random() * wall.height;
+                        const peelWidth = Math.random() * 20 + 10;
+                        const peelHeight = Math.random() * 5 + 2;
+                        
+                        ctx.fillRect(peelX - camera.x, peelY - camera.y, peelWidth, peelHeight);
+                    }
+                }
+                
+                // Neon border
+                ctx.strokeStyle = wall.type === 'exterior' ? '#00ffff' : '#ff00ff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(wall.x - camera.x, wall.y - camera.y, wall.width, wall.height);
+            }
+        }
+    }
+    
+    // Draw player character
+    function drawPlayer() {
+        ctx.save();
+        // Translate to player position relative to camera
+        ctx.translate(player.x - camera.x, player.y - camera.y);
+        ctx.rotate(player.angle);
+        
+        // Player body (neon circle)
+        ctx.fillStyle = player.invulnerable && Math.floor(player.invulnerableTime / 5) % 2 === 0 ? '#ffffff' : '#00ffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, player.size, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Player direction indicator
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(player.size + 5, 0);
+        ctx.stroke();
+        
+        // Draw kick animation if player is kicking
+        if (player.isKicking) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(player.size + 5, 0);
+            ctx.lineTo(player.size + 15, -5);
+            ctx.stroke();
+        }
+        
+        ctx.restore();
+    }
+    
+    // Draw bullets
+    function drawBullets() {
+        for (const bullet of bullets) {
+            // Set color based on weapon type
+            if (bullet.weapon === 'pistol') {
+                ctx.fillStyle = weaponProperties.pistol.color;
+            } else if (bullet.weapon === 'shotgun') {
+                ctx.fillStyle = weaponProperties.shotgun.color;
+            } else if (bullet.weapon === 'sniper') {
+                ctx.fillStyle = weaponProperties.sniper.color;
+            } else {
+                ctx.fillStyle = '#ff0000'; // Enemy bullets
+            }
+            
+            ctx.beginPath();
+            // Draw bullet at position relative to camera
+            ctx.arc(bullet.x - camera.x, bullet.y - camera.y, bullet.size, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Bullet trail
+            if (bullet.weapon === 'pistol') {
+                ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)';
+            } else if (bullet.weapon === 'shotgun') {
+                ctx.strokeStyle = 'rgba(255, 153, 0, 0.5)';
+            } else if (bullet.weapon === 'sniper') {
+                ctx.strokeStyle = 'rgba(0, 255, 255, 0.7)';
+            } else {
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+            }
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(bullet.x - camera.x, bullet.y - camera.y);
+            ctx.lineTo(
+                bullet.x - Math.cos(bullet.angle) * 15 - camera.x,
+                bullet.y - Math.sin(bullet.angle) * 15 - camera.y
+            );
+            ctx.stroke();
+        }
+    }
+    
+    // Draw enemies
+    function drawEnemies() {
+        for (const enemy of enemies) {
+            // Enemy body (color and shape based on type)
+            ctx.fillStyle = enemy.color;
+            
+            if (enemy.type === 'basic') {
+                // Draw basic enemy as square
+                ctx.fillRect(
+                    enemy.x - enemy.size - camera.x, 
+                    enemy.y - enemy.size - camera.y, 
+                    enemy.size * 2, 
+                    enemy.size * 2
+                );
+            } else if (enemy.type === 'sniper') {
+                // Draw sniper enemy as triangle
+                ctx.save();
+                ctx.translate(enemy.x - camera.x, enemy.y - camera.y);
+                ctx.rotate(enemy.angle);
+                ctx.beginPath();
+                ctx.moveTo(enemy.size, 0);
+                ctx.lineTo(-enemy.size, -enemy.size);
+                ctx.lineTo(-enemy.size, enemy.size);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            } else if (enemy.type === 'heavy') {
+                // Draw heavy enemy as circle
+                ctx.beginPath();
+                ctx.arc(enemy.x - camera.x, enemy.y - camera.y, enemy.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // Enemy health bar
+            const healthPercent = enemy.health / enemy.maxHealth;
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(
+                enemy.x - enemy.size - camera.x, 
+                enemy.y - enemy.size - 15 - camera.y, 
+                enemy.size * 2, 
+                5
+            );
+            ctx.fillStyle = '#00ff00';
+            ctx.fillRect(
+                enemy.x - enemy.size - camera.x, 
+                enemy.y - enemy.size - 15 - camera.y, 
+                enemy.size * 2 * healthPercent, 
+                5
+            );
+            
+            // Draw weapon if enemy has one
+            if (enemy.hasKnife) {
+                ctx.save();
+                ctx.translate(enemy.x - camera.x, enemy.y - camera.y);
+                ctx.rotate(enemy.angle);
+                
+                // Knife
+                ctx.strokeStyle = '#cccccc';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(enemy.size, 0);
+                ctx.lineTo(enemy.size + 10, 0);
+                ctx.stroke();
+                
+                ctx.restore();
+            } else if (enemy.type === 'sniper') {
+                // Draw sniper rifle
+                ctx.save();
+                ctx.translate(enemy.x - camera.x, enemy.y - camera.y);
+                ctx.rotate(enemy.angle);
+                
+                ctx.strokeStyle = '#00ffff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(enemy.size, 0);
+                ctx.lineTo(enemy.size + 20, 0);
+                ctx.stroke();
+                
+                ctx.restore();
+            }
+        }
+    }
+    
+    // Draw doors
+    function drawDoors() {
+        for (const door of doors) {
+            // Only draw doors that are visible in camera view
+            if (door.x + door.width > camera.x && 
+                door.x < camera.x + camera.width &&
+                door.y + door.height > camera.y && 
+                door.y < camera.y + camera.height) {
+                
+                if (!door.isBroken) {
+                    // Door itself - wood-like appearance
+                    ctx.fillStyle = '#8B4513'; // Brown color for wood
+                    ctx.fillRect(door.x - camera.x, door.y - camera.y, door.width, door.height);
+                    
+                    // Add wood grain pattern
+                    ctx.strokeStyle = '#654321';
+                    ctx.lineWidth = 1;
+                    
+                    // Vertical wood grain lines
+                    for (let i = 5; i < door.width; i += 10) {
+                        ctx.beginPath();
+                        ctx.moveTo(door.x + i - camera.x, door.y - camera.y);
+                        ctx.lineTo(door.x + i - camera.x, door.y + door.height - camera.y);
+                        ctx.stroke();
+                    }
+                    
+                    // Door border
+                    ctx.strokeStyle = '#ffff00';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(door.x - camera.x, door.y - camera.y, door.width, door.height);
+                    
+                    // Draw cracks if damaged
+                    if (door.health < door.maxHealth) {
+                        ctx.strokeStyle = '#000000';
+                        ctx.lineWidth = 1;
+                        const crackCount = door.maxHealth - door.health;
+                        
+                        for (let i = 0; i < crackCount; i++) {
+                            ctx.beginPath();
+                            ctx.moveTo(
+                                door.x + Math.random() * door.width - camera.x,
+                                door.y + Math.random() * door.height - camera.y
+                            );
+                            ctx.lineTo(
+                                door.x + Math.random() * door.width - camera.x,
+                                door.y + Math.random() * door.height - camera.y
+                            );
+                            ctx.stroke();
+                        }
+                    }
+                } else {
+                    // Draw broken door as splintered wood
+                    ctx.fillStyle = '#8B4513'; // Brown color for wood
+                    
+                    // Draw several fragments to represent broken door
+                    for (let i = 0; i < 8; i++) {
+                        const fragmentX = door.x + Math.random() * door.width;
+                        const fragmentY = door.y + Math.random() * door.height;
+                        const fragmentWidth = Math.random() * 15 + 5;
+                        const fragmentHeight = Math.random() * 15 + 5;
+                        
+                        ctx.save();
+                        ctx.translate(fragmentX - camera.x, fragmentY - camera.y);
+                        ctx.rotate(Math.random() * Math.PI); // Random rotation
+                        ctx.fillRect(-fragmentWidth/2, -fragmentHeight/2, fragmentWidth, fragmentHeight);
+                        ctx.restore();
+                    }
+                }
+            }
+        }
+    }
+    
+    // Draw blood splatters
+    function drawBloodSplatters() {
+        for (const splatter of bloodSplatters) {
+            // Only draw splatters that are visible in camera view
+            if (splatter.x > camera.x && 
+                splatter.x < camera.x + camera.width &&
+                splatter.y > camera.y && 
+                splatter.y < camera.y + camera.height) {
+                
+                ctx.fillStyle = splatter.color;
+                ctx.beginPath();
+                ctx.arc(splatter.x - camera.x, splatter.y - camera.y, splatter.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+    
+    // Draw particles
+    function drawParticles() {
+        for (const p of particles) {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = p.life / 30;
+            ctx.beginPath();
+            ctx.arc(p.x - camera.x, p.y - camera.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+    
+    // ========== HUD UPDATE FUNCTION ==========
+    // Updates HUD elements
+    function updateHUD() {
+        const killCountElement = document.getElementById('killCount');
+        const comboCountElement = document.getElementById('comboCount');
+        const healthElement = document.getElementById('healthCount');
+        
+        if (killCountElement) killCountElement.textContent = kills;
+        if (comboCountElement) comboCountElement.textContent = combo;
+        if (healthElement) healthElement.textContent = player.health;
+    }
+    
+    // Draw HUD (Heads-Up Display)
+    function drawHUD() {
+        // Draw weapon info
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '16px Courier New';
+        ctx.textAlign = 'left';
+        
+        let weaponText = `Weapon: ${player.currentWeapon === 'pistol' ? 'Pistol' : player.currentWeapon === 'shotgun' ? 'Shotgun' : 'Sniper'}`;
+        ctx.fillText(weaponText, 20, canvas.height - 140);
+        
+        // Draw ammo info based on current weapon
+        if (player.currentWeapon === 'pistol') {
+            let ammoText = `Ammo: ${player.pistolAmmo}/${weaponProperties.pistol.maxAmmo}`;
+            if (player.isReloading) {
+                ammoText += ` (Reloading...)`;
+            }
+            ctx.fillText(ammoText, 20, canvas.height - 120);
+        } else if (player.currentWeapon === 'shotgun') {
+            let ammoText = `Ammo: ${player.shotgunAmmo}/${weaponProperties.shotgun.maxAmmo}`;
+            if (player.isReloading) {
+                ammoText += ` (Reloading...)`;
+            } else if (!player.isShotgunCocked) {
+                ammoText += ` (Needs Cocking - Press C)`;
+            }
+            ctx.fillText(ammoText, 20, canvas.height - 120);
+        } else if (player.currentWeapon === 'sniper') {
+            let ammoText = `Ammo: ${player.sniperAmmo}/${weaponProperties.sniper.maxAmmo}`;
+            if (player.isReloading) {
+                ammoText += ` (Reloading...)`;
+            } else if (!player.isSniperReady) {
+                ammoText += ` (Needs Ready - Press V)`;
+            }
+            ctx.fillText(ammoText, 20, canvas.height - 120);
+        }
+        
+        // Draw player health
+        ctx.fillText(`Health: ${player.health}/${player.maxHealth}`, 20, canvas.height - 100);
+        
+        // Draw controls info
+        ctx.fillText('1: Pistol  2: Shotgun  3: Sniper', 20, canvas.height - 80);
+        ctx.fillText('F: Kick doors  R: Reload', 20, canvas.height - 60);
+        ctx.fillText('C: Cock shotgun  V: Ready sniper', 20, canvas.height - 40);
+        ctx.fillText('WASD: Move  Mouse: Aim & Shoot', 20, canvas.height - 20);
+        
+        // Draw enemy type legend
+        ctx.textAlign = 'right';
+        ctx.fillStyle = enemyTypes.basic.color;
+        ctx.fillText('Basic Enemy (10 HP)', canvas.width - 20, canvas.height - 100);
+        ctx.fillStyle = enemyTypes.sniper.color;
+        ctx.fillText('Sniper Enemy (25 HP)', canvas.width - 20, canvas.height - 80);
+        ctx.fillStyle = enemyTypes.heavy.color;
+        ctx.fillText('Heavy Enemy (40 HP)', canvas.width - 20, canvas.height - 60);
+        
+        // Draw stats
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`Kills: ${kills}`, canvas.width - 20, canvas.height - 40);
+        ctx.fillText(`Combo: ${combo}`, canvas.width - 20, canvas.height - 20);
+    }
+    
+    // ========== MAIN GAME LOOP ==========
+    function gameLoop() {
+        // Clear canvas with trail effect
+        ctx.fillStyle = 'rgba(10, 10, 10, 0.2)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Save context before screen shake
+        ctx.save();
+        
+        // Apply screen shake
+        if (camera.shakeIntensity > 0) {
+            ctx.translate(
+                (Math.random() - 0.5) * camera.shakeIntensity,
+                (Math.random() - 0.5) * camera.shakeIntensity
+            );
+            camera.shakeIntensity *= 0.9;
+        }
+        
+        // Update game objects
+        updatePlayer();
+        updateCamera();
+        updateEnemies();
+        updateBullets();
+        updateParticles();
+        
+        // Draw everything in order
+        drawBloodSplatters(); // Draw blood splatters first (background)
+        drawWalls();
+        drawDoors();
+        drawEnemies();
+        drawPlayer();
+        drawBullets();
+        drawParticles();
+        drawHUD();
+        
+        // Restore context after screen shake
+        ctx.restore();
+        
+        // Check win condition
+        if (enemies.length === 0) {
+            ctx.fillStyle = '#00ff00';
+            ctx.font = '48px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('LEVEL CLEAR!', canvas.width/2, canvas.height/2);
+            ctx.font = '24px Courier New';
+            ctx.fillText('Press R to restart', canvas.width/2, canvas.height/2 + 50);
+            
+            if (keys['r']) {
+                kills = 0;
+                combo = 0;
+                player.health = player.maxHealth;
+                player.pistolAmmo = weaponProperties.pistol.maxAmmo;
+                player.shotgunAmmo = weaponProperties.shotgun.maxAmmo;
+                player.sniperAmmo = weaponProperties.sniper.maxAmmo;
+                player.isReloading = false;
+                player.isShotgunCocked = true;
+                player.isSniperReady = true;
+                player.isDead = false;
+                initLevel();
+                updateHUD();
+            }
+        }
+        
+        // Check if player is dead
+        if (player.isDead) {
+            ctx.fillStyle = '#ff0000';
+            ctx.font = '48px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+            ctx.font = '24px Courier New';
+            ctx.fillText('Press R to restart', canvas.width/2, canvas.height/2 + 50);
+            
+            if (keys['r']) {
+                kills = 0;
+                combo = 0;
+                player.health = player.maxHealth;
+                player.pistolAmmo = weaponProperties.pistol.maxAmmo;
+                player.shotgunAmmo = weaponProperties.shotgun.maxAmmo;
+                player.sniperAmmo = weaponProperties.sniper.maxAmmo;
+                player.isReloading = false;
+                player.isShotgunCocked = true;
+                player.isSniperReady = true;
+                player.isDead = false;
+                initLevel();
+                updateHUD();
+            }
+        }
+        
+        requestAnimationFrame(gameLoop);
+    }
+    
+    // ========== START THE GAME ==========
+    initLevel();
+    updateHUD();
+    gameLoop();
+});
